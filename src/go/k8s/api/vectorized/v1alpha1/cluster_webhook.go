@@ -384,7 +384,6 @@ func (r *Cluster) validateAdminListeners() field.ErrorList {
 }
 
 func (r *Cluster) validateKafkaListeners(l logr.Logger) field.ErrorList {
-	log := l.WithName("validateKafkaListeners")
 	var allErrs field.ErrorList
 	if len(r.Spec.Configuration.KafkaAPI) == 0 {
 		allErrs = append(allErrs,
@@ -393,19 +392,11 @@ func (r *Cluster) validateKafkaListeners(l logr.Logger) field.ErrorList {
 				"need at least one kafka api listener"))
 	}
 
-	var external *KafkaAPI
-	var externalIdx int
+	indexedExternal := map[int]*KafkaAPI{}
 	for i := range r.Spec.Configuration.KafkaAPI {
 		p := &r.Spec.Configuration.KafkaAPI[i]
-		if p.External.Enabled {
-			if external != nil {
-				allErrs = append(allErrs,
-					field.Invalid(field.NewPath("spec").Child("configuration").Child("kafkaApi"),
-						r.Spec.Configuration.KafkaAPI,
-						"only one kafka api listener can be marked as external"))
-			}
-			external = &r.Spec.Configuration.KafkaAPI[i]
-			externalIdx = i
+		if p != nil && p.External.Enabled {
+			indexedExternal[i] = p
 		}
 	}
 
@@ -435,52 +426,66 @@ func (r *Cluster) validateKafkaListeners(l logr.Logger) field.ErrorList {
 		}
 	}
 
-	allErrs = append(allErrs,
-		validateTLSRules(r.KafkaTLSListeners(), field.NewPath("spec").Child("configuration").Child("kafkaApi"))...)
+	allErrs = append(
+		allErrs,
+		validateTLSRules(r.KafkaTLSListeners(), field.NewPath("spec").Child("configuration").Child("kafkaApi"))...,
+	)
+	allErrs = append(
+		allErrs,
+		checkValidExternalKafkaListener(l.WithName("validateKafkaListeners"), r.Spec.Configuration.KafkaAPI, indexedExternal)...,
+	)
 
-	if !((len(r.Spec.Configuration.KafkaAPI) == 2 && external != nil) || (external == nil && len(r.Spec.Configuration.KafkaAPI) == 1)) {
+	return allErrs
+}
+
+func checkValidExternalKafkaListener(log logr.Logger, kafkaAPI []KafkaAPI, indexedExternal map[int]*KafkaAPI) field.ErrorList {
+	var allErrs field.ErrorList
+	if !((len(kafkaAPI) == 2 && len(indexedExternal) > 0) || (len(indexedExternal) == 0 && len(kafkaAPI) == 1)) {
 		allErrs = append(allErrs,
 			field.Invalid(field.NewPath("spec").Child("configuration").Child("kafkaApi"),
-				r.Spec.Configuration.KafkaAPI,
+				kafkaAPI,
 				"one internal listener and up to to one external kafka api listener is required"))
 	}
-	if external != nil && external.Port != 0 && (external.Port < 30000 || external.Port > 32768) {
-		allErrs = append(allErrs,
-			field.Invalid(field.NewPath("spec").Child("configuration").Child("kafkaApi"),
-				r.Spec.Configuration.KafkaAPI,
-				"external port must be in the following range: 30000-32768"))
-	}
-	if external != nil && external.External.PreferredAddressType != "" && external.External.Subdomain != "" {
-		allErrs = append(allErrs,
-			field.Invalid(field.NewPath("spec").Child("configuration").Child("kafkaApi"),
-				r.Spec.Configuration.KafkaAPI,
-				"cannot provide both a preferred address type and a subdomain"))
-	}
-	if external != nil && external.External.Bootstrap != nil && external.External.Bootstrap.Port == 0 {
-		allErrs = append(allErrs,
-			field.Invalid(field.NewPath("spec").Child("configuration").Child("kafkaApi"),
-				r.Spec.Configuration.KafkaAPI,
-				"bootstrap port cannot be empty"))
-	}
-	//nolint:dupl // not identical
-	if external != nil && external.External.EndpointTemplate != "" {
-		if external.External.Subdomain == "" {
-			allErrs = append(allErrs,
-				field.Invalid(field.NewPath("spec").Child("configuration").Child("kafkaApi").Index(externalIdx).Child("external"),
-					external.External,
-					"endpointTemplate can only be used in combination with subdomain"))
-		}
 
-		err := checkValidEndpointTemplate(external.External.EndpointTemplate)
-		if err != nil {
-			log.Error(err, "Invalid endpoint template received", "template", external.External.EndpointTemplate)
+	for idx, external := range indexedExternal {
+
+		if external.Port != 0 && (external.Port < 30000 || external.Port > 32768) {
 			allErrs = append(allErrs,
-				field.Invalid(field.NewPath("spec").Child("configuration").Child("kafkaApi").Index(externalIdx).Child("external").Child("endpointTemplate"),
-					external.External.EndpointTemplate,
-					fmt.Sprintf("template is invalid: %v", err)))
+				field.Invalid(field.NewPath("spec").Child("configuration").Child("kafkaApi"),
+					kafkaAPI,
+					"external port must be in the following range: 30000-32768"))
+		}
+		if external.External.PreferredAddressType != "" && external.External.Subdomain != "" {
+			allErrs = append(allErrs,
+				field.Invalid(field.NewPath("spec").Child("configuration").Child("kafkaApi"),
+					kafkaAPI,
+					"cannot provide both a preferred address type and a subdomain"))
+		}
+		if external.External.Bootstrap != nil && external.External.Bootstrap.Port == 0 {
+			allErrs = append(allErrs,
+				field.Invalid(field.NewPath("spec").Child("configuration").Child("kafkaApi"),
+					kafkaAPI,
+					"bootstrap port cannot be empty"))
+		}
+		//nolint:dupl // not identical
+		if external.External.EndpointTemplate != "" {
+			if external.External.Subdomain == "" {
+				allErrs = append(allErrs,
+					field.Invalid(field.NewPath("spec").Child("configuration").Child("kafkaApi").Index(idx).Child("external"),
+						external.External,
+						"endpointTemplate can only be used in combination with subdomain"))
+			}
+
+			err := checkValidEndpointTemplate(external.External.EndpointTemplate)
+			if err != nil {
+				log.Error(err, "Invalid endpoint template received", "template", external.External.EndpointTemplate)
+				allErrs = append(allErrs,
+					field.Invalid(field.NewPath("spec").Child("configuration").Child("kafkaApi").Index(idx).Child("external").Child("endpointTemplate"),
+						external.External.EndpointTemplate,
+						fmt.Sprintf("template is invalid: %v", err)))
+			}
 		}
 	}
-
 	return allErrs
 }
 
